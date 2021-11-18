@@ -329,6 +329,9 @@ export type WASIConfigOld = {
   env?: WASIEnv;
   args?: WASIArgs;
   bindings?: WASIBindings;
+  stdin?: {
+    read: () => Promise<Uint8Array>;
+  };
 };
 export type WASIConfig = {
   preopens?: WASIPreopenedDirs;
@@ -336,7 +339,10 @@ export type WASIConfig = {
   args?: WASIArgs;
   bindings?: WASIBindings;
   traceSyscalls?: boolean;
-};
+  stdin?: {
+    read: () => Promise<Uint8Array>;
+  };
+}
 
 export class WASIError extends Error {
   errno: number;
@@ -371,6 +377,7 @@ export default class WASIDefault {
   FD_MAP: Map<number, File>;
   wasiImport: Exports;
   bindings: WASIBindings;
+  stdin?: { read: () => Promise<Uint8Array> };
   static defaultBindings: WASIBindings = defaultBindings;
 
   constructor(wasiConfig?: WASIConfigOld | WASIConfig) {
@@ -382,6 +389,8 @@ export default class WASIDefault {
       preopens = (wasiConfig as WASIConfigOld)
         .preopenDirectories as WASIPreopenedDirs;
     }
+
+    this.stdin = wasiConfig?.stdin;
 
     let env: WASIEnv = {};
     if (wasiConfig && wasiConfig.env) {
@@ -812,11 +821,12 @@ export default class WASIDefault {
         }
       ),
       fd_read: wrap(
-        (fd: number, iovs: number, iovsLen: number, nread: number) => {
+        async (fd: number, iovs: number, iovsLen: number, nread: number) => {
           const stats = CHECK_FD(fd, WASI_RIGHT_FD_READ);
           const IS_STDIN = stats.real === 0;
           let read = 0;
-          outer: for (const iov of getiovs(iovs, iovsLen)) {
+          outer: for await (const iov of getiovs(iovs, iovsLen)) {
+            const stdinBuffer = IS_STDIN && this.stdin ? await this.stdin.read() : undefined
             let r = 0;
             while (r < iov.byteLength) {
               let length = iov.byteLength - r;
@@ -824,6 +834,11 @@ export default class WASIDefault {
                 IS_STDIN || stats.offset === undefined
                   ? null
                   : Number(stats.offset);
+              if (stdinBuffer) {
+                for (let i = 0, j = stdinBuffer.byteLength; i < j; i++) {
+                  iov[i] = stdinBuffer[i];
+                }
+              }
               let rr = fs.readSync(
                 stats.real, // fd
                 iov, // buffer
